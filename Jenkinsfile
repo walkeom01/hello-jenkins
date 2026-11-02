@@ -11,20 +11,35 @@ def awsRun(cmd) {
         string(credentialsId: 'aws-key-id', variable: 'AWS_ACCESS_KEY_ID'),
         string(credentialsId: 'aws-secret', variable: 'AWS_SECRET_ACCESS_KEY')
     ]) {
-        run(cmd)
+        run(
+            "docker run --rm " +
+            "-e AWS_ACCESS_KEY_ID " +
+            "-e AWS_SECRET_ACCESS_KEY " +
+            "-e AWS_DEFAULT_REGION=${env.REGION} " +
+            "amazon/aws-cli ${cmd}"
+        )
     }
 }
 
 def ecrLogin() {
-    awsRun(
-        "aws ecr get-login-password --region ${env.REGION} | " +
-        "docker login --username AWS --password-stdin ${env.REGISTRY}"
-    )
+    withCredentials([
+        string(credentialsId: 'aws-key-id', variable: 'AWS_ACCESS_KEY_ID'),
+        string(credentialsId: 'aws-secret', variable: 'AWS_SECRET_ACCESS_KEY')
+    ]) {
+        run(
+            "docker run --rm " +
+            "-e AWS_ACCESS_KEY_ID " +
+            "-e AWS_SECRET_ACCESS_KEY " +
+            "-e AWS_DEFAULT_REGION=${env.REGION} " +
+            "amazon/aws-cli ecr get-login-password --region ${env.REGION} " +
+            "| docker login --username AWS --password-stdin ${env.REGISTRY}"
+        )
+    }
 }
 
 def deploy() {
     awsRun(
-        "aws ssm send-command --region ${env.REGION} " +
+        "ssm send-command --region ${env.REGION} " +
         "--instance-ids ${env.INSTANCE} " +
         "--document-name AWS-RunShellScript " +
         "--parameters file://deploy.json"
@@ -46,7 +61,6 @@ pipeline {
     }
 
     stages {
-
         stage('Build') {
             steps {
                 script {
@@ -66,7 +80,7 @@ pipeline {
         stage('AWS Authentication') {
             steps {
                 script {
-                    awsRun("aws sts get-caller-identity")
+                    awsRun("sts get-caller-identity")
                 }
             }
         }
