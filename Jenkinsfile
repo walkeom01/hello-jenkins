@@ -1,99 +1,97 @@
+def run(cmd) {
+    if (isUnix()) {
+        sh(script: cmd)
+    } else {
+        bat(script: cmd)
+    }
+}
+
+def awsRun(cmd) {
+    withCredentials([
+        string(credentialsId: 'aws-key-id', variable: 'AWS_ACCESS_KEY_ID'),
+        string(credentialsId: 'aws-secret', variable: 'AWS_SECRET_ACCESS_KEY')
+    ]) {
+        run(cmd)
+    }
+}
+
+def ecrLogin() {
+    awsRun(
+        "aws ecr get-login-password --region ${env.REGION} | " +
+        "docker login --username AWS --password-stdin ${env.REGISTRY}"
+    )
+}
+
+def deploy() {
+    awsRun(
+        "aws ssm send-command --region ${env.REGION} " +
+        "--instance-ids ${env.INSTANCE} " +
+        "--document-name AWS-RunShellScript " +
+        "--parameters file://deploy.json"
+    )
+}
+
 pipeline {
     agent any
 
     environment {
-        AWS_REGION      = 'ap-south-1'
-        AWS_ACCOUNT_ID  = '603694479177'
-        ECR_REPOSITORY  = 'hello-jenkins'
-        ECR_REGISTRY    = "${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com"
+        REGION   = 'ap-south-1'
+        ACCOUNT  = '603694479177'
+        REPO     = 'hello-jenkins'
+        INSTANCE = 'none'
 
-        IMAGE_NAME      = 'hello-jenkins'
-        IMAGE_TAG       = "${BUILD_NUMBER}"
-        LOCAL_IMAGE     = "${IMAGE_NAME}:${BUILD_NUMBER}"
-        ECR_IMAGE       = "${ECR_REGISTRY}/${ECR_REPOSITORY}:${BUILD_NUMBER}"
+        REGISTRY = "${ACCOUNT}.dkr.ecr.${REGION}.amazonaws.com"
+        IMG      = "${REPO}:${BUILD_NUMBER}"
+        REMOTE   = "${REGISTRY}/${REPO}:latest"
     }
 
     stages {
-        stage('Checkout') {
-            steps {
-                checkout scm
-            }
-        }
 
-        stage('Build Docker Image') {
+        stage('Build') {
             steps {
-                sh '''
-                    set -eu
-                    docker build -t "$LOCAL_IMAGE" .
-                '''
-            }
-        }
-
-        stage('Test Nginx Configuration') {
-            steps {
-                sh '''
-                    set -eu
-                    docker run --rm "$LOCAL_IMAGE" nginx -t
-                '''
-            }
-        }
-
-        stage('Tag Image') {
-            steps {
-                sh '''
-                    set -eu
-                    docker tag "$LOCAL_IMAGE" "$ECR_IMAGE"
-                '''
-            }
-        }
-
-        stage('Login to AWS ECR') {
-            steps {
-                withCredentials([
-                    [$class: 'AmazonWebServicesCredentialsBinding',
-                     credentialsId: 'aws-secret']
-                ]) {
-                    sh '''
-                        set -eu
-
-                        docker run --rm \
-                            -e AWS_ACCESS_KEY_ID="$AWS_ACCESS_KEY_ID" \
-                            -e AWS_SECRET_ACCESS_KEY="$AWS_SECRET_ACCESS_KEY" \
-                            -e AWS_SESSION_TOKEN="${AWS_SESSION_TOKEN:-}" \
-                            -e AWS_DEFAULT_REGION="$AWS_REGION" \
-                            amazon/aws-cli \
-                            ecr get-login-password --region "$AWS_REGION" \
-                        | docker login \
-                            --username AWS \
-                            --password-stdin "$ECR_REGISTRY"
-                    '''
+                script {
+                    run("docker build -t ${IMG} .")
                 }
             }
         }
 
-        stage('Push to AWS ECR') {
+        stage('Test') {
             steps {
-                sh '''
-                    set -eu
-                    docker push "$ECR_IMAGE"
-                '''
+                script {
+                    run("docker run --rm ${IMG} nginx -t")
+                }
             }
         }
-    }
 
-    post {
-        success {
-            echo "Pipeline completed. Image pushed: ${ECR_IMAGE}"
+        stage('AWS Authentication') {
+            steps {
+                script {
+                    awsRun("aws sts get-caller-identity")
+                }
+            }
         }
 
-        failure {
-            echo 'Pipeline failed. Check the stage logs above for the error.'
+        stage('Push') {
+            steps {
+                script {
+                    ecrLogin()
+                    run("docker tag ${IMG} ${REMOTE}")
+                    run("docker push ${REMOTE}")
+                }
+            }
         }
 
-        always {
-            sh '''
-                docker image rm -f "$LOCAL_IMAGE" "$ECR_IMAGE" 2>/dev/null || true
-            '''
+        stage('Deploy') {
+            when {
+                expression {
+                    return env.INSTANCE != 'none'
+                }
+            }
+            steps {
+                script {
+                    deploy()
+                }
+            }
         }
     }
 }
